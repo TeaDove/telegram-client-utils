@@ -2,6 +2,9 @@ package container
 
 import (
 	"os"
+	"path/filepath"
+
+	"github.com/teadove/goteleout/internal/service/storage/memory"
 
 	"github.com/mitchellh/go-homedir"
 	"github.com/rs/zerolog"
@@ -30,13 +33,18 @@ func MustNewCombatContainer() Container {
 	err = os.MkdirAll(realPath, os.ModePerm)
 	utils.Check(err)
 
+	path := filepath.Join(realPath, settings.Storage.Filename)
 	clientService := client.MustNewClientService()
+	memoryStorage := memory.MustNew(true, path)
 
 	telegramPresentation := telegram.MustNewTelegramPresentation(
 		&clientService,
 		settings.Telegram.AppID,
 		settings.Telegram.AppHash,
+		settings.Telegram.PhoneNumber,
 		settings.Telegram.SessionFullPath,
+		memoryStorage,
+		settings.LogErrorToSelf,
 	)
 
 	container := Container{&telegramPresentation, settings.Telegram.SessionFullPath}

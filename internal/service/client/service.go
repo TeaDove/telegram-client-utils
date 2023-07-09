@@ -1,7 +1,6 @@
 package client
 
-type Service struct {
-}
+type Service struct{}
 
 func MustNewClientService() Service {
 	service := Service{}
@@ -10,5 +9,4 @@ func MustNewClientService() Service {
 }
 
 func (r Service) Run() {
-
 }

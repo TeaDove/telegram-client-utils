@@ -20,7 +20,6 @@ func action(cCtx *cli.Context) error {
 
 func init() {
 	combatContainer = container.MustNewCombatContainer()
-	captureInterrupt()
 }
 
 func RunCli() {
@@ -47,7 +46,8 @@ func captureInterrupt() {
 	signal.Notify(c, os.Interrupt)
 	go func() {
 		for sig := range c {
-			log.Panic().Str("signal", sig.String()).Msg("captured exit signal, exiting...")
+			println()
+			log.Info().Str("signal", sig.String()).Msg("captured exit signal, exiting...")
 			pprof.StopCPUProfile()
 			os.Exit(0)
 		}

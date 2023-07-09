@@ -10,20 +10,27 @@ import (
 )
 
 const (
-	defaultEnvPrefix = "tcu_"
+	defaultEnvPrefix = "fun_"
 	defaultEnvFile   = ".env"
 )
 
 type telegram struct {
 	AppID           int    `env:"app_id,required"`
 	AppHash         string `env:"app_hash,required"`
-	SessionPath     string `env:"session_storage_path" envDefault:"telegram-session.json"`
+	PhoneNumber     string `env:"phone_number,required"`
+	SessionPath     string `env:"session_storage_path"  envDefault:"telegram-session.json"`
 	SessionFullPath string
 }
 
+type storage struct {
+	Filename string `env:"filename" envDefault:"storage.json"`
+}
+
 type Settings struct {
+	LogErrorToSelf  bool     `env:"log_error_to_self" envDefault:"false"`
 	Telegram        telegram `envPrefix:"telegram__"`
-	FileStoragePath string   `                       env:"file_storage_path" envDefault:"~/.config/telegram-client-utils/"`
+	Storage         storage  `envPrefix:"storage__"`
+	FileStoragePath string   `                       env:"file_storage_path" envDefault:"~/.config/fun-telegram/"`
 	LogLevel        string   `                       env:"log_level"         envDefault:"debug"`
 }
 

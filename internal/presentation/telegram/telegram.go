@@ -1,146 +1,131 @@
 package telegram
 
 import (
-	"context"
 	"errors"
-	"strings"
+	"fmt"
 
+	"github.com/anonyindian/gotgproto/dispatcher"
+	"github.com/anonyindian/gotgproto/ext"
+	"github.com/rs/zerolog/log"
+
+	"github.com/anonyindian/gotgproto"
+	"github.com/anonyindian/gotgproto/dispatcher/handlers"
+	"github.com/anonyindian/gotgproto/sessionMaker"
 	"github.com/gotd/td/telegram"
-	"github.com/gotd/td/telegram/auth"
 	"github.com/gotd/td/telegram/message"
 	"github.com/gotd/td/telegram/peers"
 	"github.com/gotd/td/tg"
-	"github.com/rs/zerolog/log"
 	"github.com/teadove/goteleout/internal/service/client"
+	"github.com/teadove/goteleout/internal/service/storage"
+	"github.com/teadove/goteleout/internal/utils"
 )
 
-type Presentation struct {
-	telegramClient     *telegram.Client
-	telegramDispatcher *tg.UpdateDispatcher
-	telegramSender     *message.Sender
-	telegramApi        *tg.Client
-	telegramManager    *peers.Manager
-	commandHandler     map[string]commandProcessor
+var BadUpdate = errors.New("bad update")
 
+type Presentation struct {
+	telegramClient  *telegram.Client
+	telegramSender  *message.Sender
+	telegramApi     *tg.Client
+	telegramManager *peers.Manager
+	protoClient     *gotgproto.Client
+
+	storage       storage.Interface
 	clientService *client.Service
+
+	logErrorToSelf bool
 }
 
 func MustNewTelegramPresentation(
 	clientService *client.Service,
 	telegramAppID int,
 	telegramAppHash string,
+	telegramPhoneNumber string,
 	telegramSessionStorageFullPath string,
+	storage storage.Interface,
+	logErrorToSelf bool,
 ) Presentation {
-	// https://core.telegram.org/api/obtaining_api_id
+	protoClient, err := gotgproto.NewClient(telegramAppID, telegramAppHash, gotgproto.ClientType{
+		Phone: telegramPhoneNumber,
+	}, &gotgproto.ClientOpts{
+		DisableCopyright: true,
+		Session: sessionMaker.NewSession(
+			telegramSessionStorageFullPath,
+			sessionMaker.Session,
+		),
+	})
+	utils.Check(err)
 
-	sessionStorage := telegram.FileSessionStorage{Path: telegramSessionStorageFullPath}
-	updater := tg.NewUpdateDispatcher()
-	telegramClient := telegram.NewClient(
-		telegramAppID,
-		telegramAppHash,
-		telegram.Options{SessionStorage: &sessionStorage, UpdateHandler: updater},
-	)
-	api := telegramClient.API()
-	sender := message.NewSender(api)
+	api := protoClient.API()
 
 	presentation := Presentation{
-		telegramClient:     telegramClient,
-		clientService:      clientService,
-		telegramDispatcher: &updater,
-		telegramApi:        api,
-		telegramSender:     sender,
+		clientService:   clientService,
+		storage:         storage,
+		protoClient:     protoClient,
+		telegramApi:     api,
+		telegramSender:  message.NewSender(api),
+		telegramManager: peers.Options{}.Build(api),
+		logErrorToSelf:  logErrorToSelf,
 	}
-	presentation.commandHandler = map[string]commandProcessor{
-		"ping": presentation.pingCommandHandler,
-		"help": presentation.helpCommandHandler}
-	presentation.telegramManager = peers.Options{}.Build(api)
+
+	protoClient.Dispatcher.AddHandler(handlers.NewCommand("echo", presentation.echoCommandHandler))
+	protoClient.Dispatcher.AddHandler(handlers.NewCommand("help", presentation.helpCommandHandler))
+	protoClient.Dispatcher.AddHandler(
+		handlers.NewCommand("get_me", presentation.getMeCommandHandler),
+	)
+	protoClient.Dispatcher.AddHandler(handlers.NewCommand("ping", presentation.pingCommandHandler))
+	protoClient.Dispatcher.AddHandler(
+		handlers.NewCommand("spam_reaction", presentation.spamReactionCommandHandler),
+	)
+	protoClient.Dispatcher.AddHandler(
+		handlers.Message{
+			Callback:      presentation.spamReactionMessageHandler,
+			Filters:       nil,
+			UpdateFilters: nil,
+			Outgoing:      true,
+		},
+	)
+	dp, ok := protoClient.Dispatcher.(*dispatcher.NativeDispatcher)
+	if !ok {
+		utils.Check(errors.New("can only work with NativeDispatcher"))
+	}
+	dp.Error = presentation.errorHandler
 
 	return presentation
 }
 
-var (
-	BadUpdate = errors.New("bad update")
-)
-
-func (r *Presentation) login(ctx context.Context) error {
-	flow := auth.NewFlow(terminalAuth{}, auth.SendCodeOptions{})
-	status, err := r.telegramClient.Auth().Status(ctx)
-	if !status.Authorized {
-		log.Info().Str("status", "authorizing").Send()
-		err = r.telegramClient.Auth().IfNecessary(ctx, flow)
+func (r *Presentation) errorHandler(
+	ctx *ext.Context,
+	update *ext.Update,
+	errorString string,
+) error {
+	log.Error().
+		Stack().
+		Err(errors.New(errorString)).
+		Str("status", "error.while.processing.update").
+		Interface("update", update).
+		Send()
+	if r.logErrorToSelf {
+		_, err := ctx.SendMessage(ctx.Self.ID, &tg.MessagesSendMessageRequest{
+			Silent:  true,
+			Message: fmt.Sprintf("Error occured while processing update:\n\n%s", errorString),
+		})
+		if err != nil {
+			return err
+		}
 	}
-	if err != nil {
-		return errors.Join(err, errors.New("error while authenticating"))
-	}
+	return nil
+}
 
-	_, err = r.telegramSender.Self().Text(ctx, "Telegram client initialized")
+func (r *Presentation) Run() error {
+	ctx := r.protoClient.CreateContext()
+	_, err := ctx.SendMessage(
+		ctx.Self.ID,
+		&tg.MessagesSendMessageRequest{Message: "Fun telegram initialized!"},
+	)
 	if err != nil {
 		return err
 	}
 
-	return nil
-}
-
-func (r *Presentation) routeMessage(
-	ctx context.Context,
-	entities *tg.Entities,
-	update message.AnswerableMessageUpdate,
-) error {
-	m, ok := update.GetMessage().(*tg.Message)
-	if !ok {
-		return BadUpdate
-	}
-
-	if m.Post {
-		return nil
-	}
-	log.Debug().Str("status", "message.got").Str("text", m.Message).Interface("message", m).Send()
-
-	firstMessage := strings.Split(m.Message, " ")[0]
-	const commandPrefix = '!'
-	if len(firstMessage) < 1 {
-		return nil
-	}
-	if firstMessage[0] != commandPrefix {
-		return nil
-	}
-	command := firstMessage[1:]
-	log.Info().Str("status", "command.got").Str("command", command).Send()
-	handler, ok := r.commandHandler[command]
-	if !ok {
-		log.Info().
-			Str("status", "unknown.command").
-			Str("command", command).
-			Str("text", m.Message).
-			Send()
-		return nil
-	}
-	return handler(ctx, entities, update, m)
-}
-
-func (r *Presentation) Run() error {
-	return r.telegramClient.Run(context.Background(), func(ctx context.Context) error {
-		err := r.login(ctx)
-		if err != nil {
-			return err
-		}
-
-		r.telegramDispatcher.OnNewChannelMessage(
-			func(ctx context.Context, entities tg.Entities, update *tg.UpdateNewChannelMessage) error {
-				return r.routeMessage(ctx, &entities, update)
-			},
-		)
-
-		r.telegramDispatcher.OnNewMessage(
-			func(ctx context.Context, entities tg.Entities, update *tg.UpdateNewMessage) error {
-				return r.routeMessage(ctx, &entities, update)
-			},
-		)
-		err = telegram.RunUntilCanceled(context.Background(), r.telegramClient)
-		if err != nil {
-			return err
-		}
-
-		return nil
-	})
+	err = r.protoClient.Idle()
+	return err
 }
